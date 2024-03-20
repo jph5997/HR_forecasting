@@ -1,0 +1,183 @@
+---
+title: "Predicting 2024 AL & NL Home Run Leaders"
+author: "Jacob Hallowell"
+date: "2024-03-07"
+output: html_notebook
+---
+
+I am conducting this experiment for a couple reasons. To be honest, I saw FanDuel had a section where I can bet on who will lead the American and National Leagues in Home Runs for the upcoming season. I figured I can use publicly available data to get a good idea for who it will be, rather than using my gut.
+
+Let's start by loading in the datasets and separating them so I can join them later.
+```{r}
+# clear the environment
+rm(list = ls())
+
+library(tidyverse)
+library(caret)
+library(dplyr)
+library(data.table)
+library(Hmisc)
+library(randomForest)
+
+batter2023 <- read.csv("batter2023.csv")
+batter2022 <- read.csv("batter2022.csv")
+batter2021 <- read.csv("batter2021.csv")
+```
+
+After doing this I want to get subsets of the data so I can join them to other datasets. This way I can predict how many home runs they will hit. Unfortunately, I only grabbed stuff from baseball savant. There are going to be flaws with this, but I am going to point them out as I go along.
+```{r}
+home_runs2023 <- batter2023 %>%
+  select(player_id, home_run)
+home_runs2022 <- batter2022 %>%
+  select(player_id, home_run)
+home_runs2021 <- batter2021 %>%
+  select(player_id, home_run)
+
+IDtoName21 <- batter2021 %>%
+  select(ï..last_name..first_name, player_id)
+IDtoName22 <- batter2022 %>%
+  select(ï..last_name..first_name, player_id)
+IDtoName23 <- batter2023 %>%
+  select(ï..last_name..first_name, player_id)
+```
+
+After this I really want to clean the data I have now. In my mind I want the columns to be similar so the machine has less trouble interpreting the columns. With how I downloaded the data, the percentage columns are out of 100 and the other columns are not. For example, ground ball percent is 24.1 not 0.241 like the rest.
+```{r}
+convert_to_decimal <- function(df, cols) {
+  for (col in cols) {
+    df[[col]] <- df[[col]] / 100
+  }
+  return(df)
+}
+
+percentage_columns <- c('groundballs_percent', 'flyballs_percent', 'linedrives_percent', 'k_percent', 'bb_percent', 'sweet_spot_percent', 'barrel_batted_rate', 'hard_hit_percent', 'whiff_percent', 'swing_percent', 'pull_percent', 'straightaway_percent', 'opposite_percent')
+
+# Convert for each dataset
+batter2021 <- convert_to_decimal(batter2021, percentage_columns)
+batter2022 <- convert_to_decimal(batter2022, percentage_columns)
+batter2023 <- convert_to_decimal(batter2023, percentage_columns)
+```
+
+The next step is joining the home runs for the next year into the data. I can do this by joining. I also need to rename the future home runs.
+```{r}
+home_runs2022 <- home_runs2022 %>% rename(next_year_home_run = home_run)
+home_runs2023 <- home_runs2023 %>% rename(next_year_home_run = home_run)
+
+data2021 <- left_join(batter2021, home_runs2022, by = "player_id")
+data2022 <- left_join(batter2022, home_runs2023, by = "player_id")
+```
+
+Now we can start cleaning our data for model building.
+```{r}
+# remove NAs in data 2021-2022
+data2021 <- data2021 %>% filter(next_year_home_run >= 0)
+data2022 <- data2022 %>% filter(next_year_home_run >= 0)
+
+columns_to_remove <- c('player_id', 'year', 'ï..last_name..first_name')
+
+# Remove specified columns from each dataset
+data2021 <- data2021[, !(names(data2021) %in% columns_to_remove)]
+data2022 <- data2022[, !(names(data2022) %in% columns_to_remove)]
+data2023 <- batter2023[, !(names(batter2023) %in% columns_to_remove)]
+```
+
+Now that I have my cleaned data I can do a couple of things. First I want to create a correlation matrix and then I want to make a model. Lets start with making a model then I will show I correlation matrix. This is going to be a relatively simple model because I don't want to get too complex yet.
+```{r}
+combined_data <- rbind(data2021, data2022)
+
+library(caTools)
+set.seed(42) # for reproducibility
+split <- sample.split(combined_data$next_year_home_run, SplitRatio = 0.8)
+training_set <- subset(combined_data, split == TRUE)
+testing_set <- subset(combined_data, split == FALSE)
+
+# i love random forest
+library(randomForest)
+set.seed(42)
+model <- randomForest(next_year_home_run ~ ., data = training_set, ntree = 100)
+
+predictions <- predict(model, testing_set)
+mse <- mean((testing_set$next_year_home_run - predictions)^2)
+print(mse)
+
+
+library(Metrics)
+library(performance)
+mae <- mae(testing_set$next_year_home_run, predictions)
+
+print(mae)
+
+```
+
+Now it is time to make predictions on our 2023 dataset.
+```{r}
+predictions2024 <- predict(model, data2023)
+```
+
+I want to attach my ids to my predictions this way I can actually see who is predicted for the most.
+```{r}
+#predictions2024 <- as.data.frame(predictions2024)
+
+batter2023$PredHR <- predictions2024
+final_pred <- batter2023 %>%
+  select(ï..last_name..first_name, PredHR)
+```
+
+Lets take a look:
+```{r}
+final_pred %>%
+  arrange(desc(PredHR)) %>%
+  head()
+```
+
+Now I want to check out the correlation matrix. I want to use combined_data for that because it will be using actual data, not forecasted data.
+```{r}
+cor_matrix <- cor(combined_data[, sapply(combined_data, is.numeric)])
+cor_with_next_year_homeruns <- cor_matrix["next_year_home_run", ]
+sorted_correlations <- sort(cor_with_next_year_homeruns, decreasing = TRUE)
+print(sorted_correlations)
+```
+
+Now I want to create a colored table
+```{r}
+library(DT)
+cor_df <- as.data.frame(cor_matrix)
+
+# Add row names as a new column for display
+cor_df$Variable <- row.names(cor_df)
+cor_table <- cor_df %>%
+  select(Variable, next_year_home_run)
+
+# Create the datatable and apply coloring
+datatable(cor_df, options = list(pageLength = 5, autoWidth = TRUE)) %>%
+  formatStyle(
+    'Variable',
+    target = 'row', # Highlight entire row
+    backgroundColor = styleInterval(c(-0.5, 0.5), c('red', 'white', 'blue'))
+  ) %>%
+  formatStyle(
+    names(cor_df),
+    backgroundColor = styleInterval(c(-0.5, 0.5), c('red', 'white', 'blue')),
+    color = 'black', # Text color
+    fontWeight = 'bold'
+  )
+
+```
+
+I dont like the whole table, so i am going to try and accomplish this with one row.
+```{r}
+cor_next_year_home_run <- cor_matrix["next_year_home_run", ]
+cor_df_next_year_home_run <- as.data.frame(cor_next_year_home_run)
+cor_df_next_year_home_run$Variable <- rownames(cor_df_next_year_home_run)
+
+library(DT)
+
+datatable(cor_df_next_year_home_run, options = list(pageLength = 5, autoWidth = TRUE)) %>%
+  formatStyle(
+    names(cor_df_next_year_home_run),
+    backgroundColor = styleInterval(c(-0.5, 0.5), c('blue', 'white', 'red')),
+    color = 'black', # Text color
+    fontWeight = 'bold'
+  )
+```
+
